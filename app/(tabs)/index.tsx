@@ -1,29 +1,57 @@
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import React, { useEffect, useState } from 'react';
-import { Alert, FlatList, Keyboard, Linking, Modal, SafeAreaView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+import { ActivityIndicator, Alert, FlatList, Keyboard, Linking, Modal, Platform, SafeAreaView, StatusBar, StyleSheet, Text, TextInput, TouchableOpacity, View } from 'react-native';
+// Platform එක Import කළා Web ද Mobile ද කියලා බලාගන්න
+import { addDoc, collection, deleteDoc, doc, onSnapshot, orderBy, query, updateDoc } from 'firebase/firestore';
+import { db } from '../firebaseConfig';
+
+interface Transaction {
+  id: string;
+  date: string;
+  reason: string;
+  amount: number;
+  type: 'credit' | 'payment';
+}
+
+interface Customer {
+  id: string;
+  customerNo: string;
+  name: string;
+  mobile: string;
+  creditLimit: number;
+  balance: number;
+  transactions: Transaction[];
+}
 
 export default function NayaPotha() {
-  // --- Login State ---
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [inputPin, setInputPin] = useState('');
   const CORRECT_PIN = '1234';
 
-  // --- App Data State ---
   const [name, setName] = useState('');
   const [mobile, setMobile] = useState('');
   const [creditLimit, setCreditLimit] = useState(''); 
-  const [customers, setCustomers] = useState([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
+  const [loading, setLoading] = useState(true);
   
-  // --- Modal State ---
   const [modalVisible, setModalVisible] = useState(false);
-  const [selectedCustomer, setSelectedCustomer] = useState(null);
+  const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
   const [amount, setAmount] = useState('');
   const [reason, setReason] = useState('');
 
-  useEffect(() => { loadData(); }, []);
+  useEffect(() => {
+    const q = query(collection(db, "customers"), orderBy("customerNo"));
+    const unsubscribe = onSnapshot(q, (snapshot) => {
+      const list: Customer[] = [];
+      snapshot.forEach((doc) => {
+        list.push({ id: doc.id, ...doc.data() } as Customer);
+      });
+      setCustomers(list);
+      setLoading(false);
+    });
+    return () => unsubscribe();
+  }, []);
 
-  // --- Dashboard Calculations ---
   const totalDue = customers.reduce((sum, c) => sum + (c.balance > 0 ? c.balance : 0), 0);
   const todayDate = new Date().toLocaleDateString();
   const todayCollection = customers.reduce((sum, c) => {
@@ -31,7 +59,6 @@ export default function NayaPotha() {
       return sum + todayTrans.reduce((subSum, t) => subSum + t.amount, 0);
   }, 0);
 
-  // --- Login ---
   const handleLogin = () => {
     if (inputPin === CORRECT_PIN) {
         setIsLoggedIn(true);
@@ -42,23 +69,7 @@ export default function NayaPotha() {
     }
   };
 
-  // --- Save/Load Data ---
-  const saveData = async (newList) => {
-    try {
-      const jsonValue = JSON.stringify(newList);
-      await AsyncStorage.setItem('@customers_list_v3', jsonValue);
-    } catch (e) { console.log('Error saving data'); }
-  };
-
-  const loadData = async () => {
-    try {
-      const jsonValue = await AsyncStorage.getItem('@customers_list_v3');
-      if (jsonValue != null) setCustomers(JSON.parse(jsonValue));
-    } catch (e) { console.log('Error loading data'); }
-  };
-
-  // --- Add Customer (CORRECTED) ---
-  const addCustomer = () => {
+  const addCustomer = async () => {
     if (name.length > 0) {
       const maxNo = customers.reduce((max, obj) => {
         const current = parseInt(obj.customerNo) || 0;
@@ -66,14 +77,12 @@ export default function NayaPotha() {
       }, 0);
       const nextNo = maxNo + 1;
       
-      // Limit එක හරියටම නම්බර් එකක් කරගන්නවා
-      let limitVal = 5000; // Default
-      if (creditLimit && !isNaN(creditLimit)) {
+      let limitVal = 5000;
+      if (creditLimit && !isNaN(parseFloat(creditLimit))) {
           limitVal = parseFloat(creditLimit);
       }
 
       const newCustomer = { 
-          id: Date.now().toString(), 
           customerNo: nextNo.toString(), 
           name: name, 
           mobile: mobile,
@@ -81,61 +90,54 @@ export default function NayaPotha() {
           balance: 0, 
           transactions: [] 
       };
-      const updatedList = [...customers, newCustomer];
-      setCustomers(updatedList);
-      saveData(updatedList);
-      
-      // Input boxes හිස් කරනවා
-      setName(''); 
-      setMobile(''); 
-      setCreditLimit(''); 
-      Keyboard.dismiss();
+
+      try {
+        await addDoc(collection(db, "customers"), newCustomer);
+        setName(''); setMobile(''); setCreditLimit(''); Keyboard.dismiss();
+      } catch (e) {
+        Alert.alert("Error", "ඩේටා සේව් උනේ නෑ. ඉන්ටර්නෙට් බලන්න.");
+      }
     } else { Alert.alert('Error', 'කරුණාකර නම ඇතුළත් කරන්න'); }
   };
 
-  const deleteCustomer = (id) => {
+  const deleteCustomer = (id: string) => {
+    // Web එකේදි Alert එක වෙනුවට window.confirm පාවිච්චි කරන්න වෙනවා සමහර වෙලාවට,
+    // නමුත් React Native Web වල Alert එක වැඩ.
     Alert.alert("Delete", "මෙම පාරිභෝගිකයා ඉවත් කරන්නද?", [
       { text: "නැත", style: "cancel" },
-      { text: "ඔව්", onPress: () => {
-          const newList = customers.filter(item => item.id !== id);
-          setCustomers(newList);
-          saveData(newList);
+      { text: "ඔව්", onPress: async () => {
+          await deleteDoc(doc(db, "customers", id));
       }}
     ]);
   };
 
-  // --- Transactions ---
-  const openTransactionModal = (customer) => {
+  const openTransactionModal = (customer: Customer) => {
     setSelectedCustomer(customer); setModalVisible(true); setAmount(''); setReason('');
   };
 
-  const handleTransaction = (isCredit) => {
-    if (!amount || isNaN(amount)) return;
+  const handleTransaction = async (isCredit: boolean) => {
+    if (!amount || isNaN(parseFloat(amount)) || !selectedCustomer) return;
     const value = parseFloat(amount);
     
-    // Check Credit Limit
     if (isCredit) {
         const potentialBalance = selectedCustomer.balance + value;
         const limit = selectedCustomer.creditLimit || 5000;
-        
         if (potentialBalance > limit) {
-            Alert.alert(
-                "⚠️ ණය සීමාව පැනලා!", 
-                `සීමාව: රු. ${limit}\nදැනට ණය: රු. ${selectedCustomer.balance}\nමෙය දැමුවහොත්: රු. ${potentialBalance}\n\nකෙසේ හෝ ඇතුළත් කරන්නද?`,
-                [
-                    { text: "නැත", style: "cancel" },
-                    { text: "ඔව්, කමක් නෑ", onPress: () => processTransaction(isCredit, value) }
-                ]
-            );
+            Alert.alert("⚠️ ණය සීමාව පැනලා!", "දිගටම කරගෙන යන්නද?", [
+                { text: "නැත", style: "cancel" },
+                { text: "ඔව්", onPress: () => processTransaction(isCredit, value) }
+            ]);
             return;
         }
     }
     processTransaction(isCredit, value);
   };
 
-  const processTransaction = (isCredit, value) => {
+  const processTransaction = async (isCredit: boolean, value: number) => {
+    if (!selectedCustomer) return;
+
     const newBalance = isCredit ? selectedCustomer.balance + value : selectedCustomer.balance - value;
-    const newTransaction = {
+    const newTransaction: Transaction = {
       id: Date.now().toString(),
       date: new Date().toLocaleDateString(),
       reason: reason || (isCredit ? 'ණයට' : 'ගෙවීමක්'),
@@ -143,55 +145,80 @@ export default function NayaPotha() {
       type: isCredit ? 'credit' : 'payment'
     };
     
-    const updatedList = customers.map(item => {
-        if (item.id === selectedCustomer.id) {
-            return { ...item, balance: newBalance, transactions: [newTransaction, ...item.transactions || []] };
-        }
-        return item;
+    const updatedTransactions = [newTransaction, ...(selectedCustomer.transactions || [])];
+
+    const customerRef = doc(db, "customers", selectedCustomer.id);
+    await updateDoc(customerRef, {
+        balance: newBalance,
+        transactions: updatedTransactions
     });
 
-    setCustomers(updatedList); 
-    saveData(updatedList);
-    const updatedCustomer = updatedList.find(c => c.id === selectedCustomer.id);
-    setSelectedCustomer(updatedCustomer);
-    
-    // Auto WhatsApp
-    if (updatedCustomer.mobile) {
-        Alert.alert(
-            "Saved!",
-            "WhatsApp පණිවිඩයක් යවන්නද?",
-            [
+    if (selectedCustomer.mobile) {
+        // --- WhatsApp Logic Fixed for Web & Mobile ---
+        const sendWhatsApp = () => {
+            let phone = selectedCustomer.mobile.replace(/[^0-9]/g, '');
+            if (phone.startsWith('0')) phone = '94' + phone.substring(1);
+            
+            const message = `T&S PowerTech: \nගනුදෙනුව: රු. ${value.toFixed(2)} (${isCredit ? 'ණයට' : 'ගෙවීම්'}). \nමුළු ණය: රු. ${newBalance.toFixed(2)}`;
+            
+            let url = '';
+            if (Platform.OS === 'web') {
+                // PC එකේදි Web URL එක
+                url = `https://wa.me/${phone}?text=${encodeURIComponent(message)}`;
+            } else {
+                // Phone එකේදි App URL එක
+                url = `whatsapp://send?phone=${phone}&text=${encodeURIComponent(message)}`;
+            }
+
+            Linking.openURL(url).catch(err => {
+                Alert.alert("Error", "WhatsApp Open කරන්න බැහැ. App එක Install කරලද බලන්න.");
+            });
+        };
+
+        // Web එකේදි Alert එකේ Button වැඩ කරන්නේ නැති ප්‍රශ්නයක් එන්න පුළුවන් සමහර Browser වල
+        // ඒ නිසා කෙලින්ම යවනවා ද කියල අහනවා
+        if (Platform.OS === 'web') {
+            const confirm = window.confirm("Saved! WhatsApp එකට යවන්නද?");
+            if (confirm) sendWhatsApp();
+        } else {
+            Alert.alert("Saved!", "WhatsApp යවන්නද?", [
                 { text: "No", onPress: () => {} },
-                { 
-                    text: "Yes", 
-                    onPress: () => {
-                        let phone = updatedCustomer.mobile.replace(/[^0-9]/g, '');
-                        if (phone.startsWith('0')) phone = '94' + phone.substring(1);
-                        const message = `T&S PowerTech: \nගනුදෙනුව: රු. ${value.toFixed(2)} (${isCredit ? 'ණයට' : 'ගෙවීම්'}). \nමුළු ණය: රු. ${newBalance.toFixed(2)}`;
-                        Linking.openURL(`whatsapp://send?phone=${phone}&text=${encodeURIComponent(message)}`).catch(err => console.error(err));
-                    } 
-                }
-            ]
-        );
+                { text: "Yes", onPress: sendWhatsApp }
+            ]);
+        }
     }
-    setAmount(''); setReason('');
+    
+    setAmount(''); setReason(''); setModalVisible(false);
   };
 
-  const deleteTransaction = (transactionId) => {
-    Alert.alert("Remove", "මෙම විස්තරය ඉවත් කරන්නද?", [
-        { text: "නැත", style: "cancel" },
-        { text: "ඔව්", onPress: () => {
-            const transactionToDelete = selectedCustomer.transactions.find(t => t.id === transactionId);
-            if (!transactionToDelete) return;
-            let reverseAmount = transactionToDelete.type === 'credit' ? -transactionToDelete.amount : transactionToDelete.amount;
-            const newBalance = selectedCustomer.balance + reverseAmount;
-            const newTransactions = selectedCustomer.transactions.filter(t => t.id !== transactionId);
-            const updatedList = customers.map(item => item.id === selectedCustomer.id ? { ...item, balance: newBalance, transactions: newTransactions } : item);
-            setCustomers(updatedList);
-            saveData(updatedList);
-            setSelectedCustomer(updatedList.find(c => c.id === selectedCustomer.id));
-        }}
-    ]);
+  const deleteTransaction = async (transactionId: string) => {
+    if (!selectedCustomer) return;
+    // Web confirmation handle
+    if (Platform.OS === 'web') {
+         if(!window.confirm("මෙම විස්තරය ඉවත් කරන්නද?")) return;
+         await performDelete(transactionId);
+    } else {
+        Alert.alert("Remove", "මෙම විස්තරය ඉවත් කරන්නද?", [
+            { text: "නැත", style: "cancel" },
+            { text: "ඔව්", onPress: () => performDelete(transactionId) }
+        ]);
+    }
+  };
+
+  const performDelete = async (transactionId: string) => {
+        if (!selectedCustomer) return;
+        const transactionToDelete = selectedCustomer.transactions.find(t => t.id === transactionId);
+        if (!transactionToDelete) return;
+        let reverseAmount = transactionToDelete.type === 'credit' ? -transactionToDelete.amount : transactionToDelete.amount;
+        const newBalance = selectedCustomer.balance + reverseAmount;
+        const newTransactions = selectedCustomer.transactions.filter(t => t.id !== transactionId);
+
+        const customerRef = doc(db, "customers", selectedCustomer.id);
+        await updateDoc(customerRef, {
+            balance: newBalance,
+            transactions: newTransactions
+        });
+        setModalVisible(false);
   };
 
   const filteredCustomers = customers.filter(c => c.name.toLowerCase().includes(searchQuery.toLowerCase()) || (c.customerNo && c.customerNo.includes(searchQuery)));
@@ -203,6 +230,7 @@ export default function NayaPotha() {
             <View style={styles.loginCard}>
                 <Text style={{fontSize: 50, marginBottom: 10}}>🔒</Text>
                 <Text style={styles.loginTitle}>T&S PowerTech</Text>
+                <Text style={{color:'#888', marginBottom:20}}>Online System</Text>
                 <TextInput style={styles.loginInput} placeholder="PIN" keyboardType="numeric" secureTextEntry maxLength={4} value={inputPin} onChangeText={setInputPin}/>
                 <TouchableOpacity style={styles.loginBtn} onPress={handleLogin}><Text style={styles.loginBtnText}>LOGIN</Text></TouchableOpacity>
             </View>
@@ -217,12 +245,19 @@ export default function NayaPotha() {
       <View style={styles.header}>
         <View>
             <Text style={styles.headerTitle}>T&S PowerTech</Text>
-            <Text style={styles.headerSubtitle}>Credit Management System</Text>
+            <Text style={styles.headerSubtitle}>Online Database Connected 🟢</Text>
         </View>
         <TouchableOpacity onPress={() => setIsLoggedIn(false)}><Text style={{fontSize:22}}>🔒</Text></TouchableOpacity>
       </View>
       
-      <View style={styles.dashboardRow}>
+      {loading ? (
+        <View style={{flex:1, justifyContent:'center', alignItems:'center'}}>
+            <ActivityIndicator size="large" color="#0056D2" />
+            <Text>Loading Data...</Text>
+        </View>
+      ) : (
+        <>
+        <View style={styles.dashboardRow}>
           <View style={[styles.dashCard, {backgroundColor:'#FFEBEE'}]}>
               <Text style={styles.dashLabel}>මුළු ණය (Due)</Text>
               <Text style={[styles.dashValue, {color:'#D32F2F'}]}>Rs. {totalDue.toFixed(0)}</Text>
@@ -231,55 +266,49 @@ export default function NayaPotha() {
               <Text style={styles.dashLabel}>අද එකතුව (Today)</Text>
               <Text style={[styles.dashValue, {color:'#388E3C'}]}>Rs. {todayCollection.toFixed(0)}</Text>
           </View>
-      </View>
+        </View>
 
-      <FlatList 
-        data={filteredCustomers} 
-        keyExtractor={item => item.id} 
-        contentContainerStyle={{paddingBottom: 20}}
-        ListHeaderComponent={
-          <>
-            <View style={styles.formCard}>
-                <Text style={styles.sectionTitle}>👤 අලුත් කෙනෙක් එකතු කරන්න</Text>
-                
-                {/* 1. Name Input */}
-                <TextInput style={styles.input} placeholder="නම (Name)" value={name} onChangeText={setName} />
-                
-                {/* 2. Mobile Input */}
-                <TextInput style={styles.input} placeholder="දුරකථන අංකය (Mobile)" keyboardType="phone-pad" value={mobile} onChangeText={setMobile} />
-                
-                {/* 3. Limit Input */}
-                <TextInput style={styles.input} placeholder="ණය සීමාව (Default: 1000)" keyboardType="numeric" value={creditLimit} onChangeText={setCreditLimit} />
-
-                <TouchableOpacity style={styles.addButton} onPress={addCustomer}>
-                    <Text style={styles.addButtonText}>➕ Add Customer</Text>
-                </TouchableOpacity>
-            </View>
-            
-            <View style={styles.searchContainer}>
-                <Text style={{fontSize:20, marginRight:10}}>🔍</Text>
-                <TextInput style={styles.searchInput} placeholder="නම හෝ අංකය සොයන්න..." value={searchQuery} onChangeText={setSearchQuery} />
-            </View>
-          </>
-        }
-        renderItem={({ item }) => (
-        <TouchableOpacity onPress={() => openTransactionModal(item)} onLongPress={() => deleteCustomer(item.id)} style={styles.customerCard}>
-            <View style={styles.avatarContainer}>
-                <Text style={styles.avatarText}>{item.customerNo}</Text>
-            </View>
-            <View style={{flex:1, marginLeft: 15}}>
-                <Text style={styles.customerName}>{item.name}</Text>
-                {item.balance > item.creditLimit && <Text style={{color:'red', fontSize:10, fontWeight:'bold'}}>⚠️ LIMIT EXCEEDED</Text>}
-                <Text style={styles.customerMobile}>{item.mobile || 'No Number'}</Text>
-            </View>
-            <View style={{alignItems:'flex-end'}}>
-                <Text style={{fontSize:12, color:'#888'}}>Balance</Text>
-                <Text style={[styles.balanceText, {color: item.balance > 0 ? '#D32F2F' : '#388E3C'}]}>
-                    {item.balance.toFixed(0)}
-                </Text>
-            </View>
-        </TouchableOpacity>
-      )} />
+        <FlatList 
+            data={filteredCustomers} 
+            keyExtractor={item => item.id} 
+            contentContainerStyle={{paddingBottom: 20}}
+            ListHeaderComponent={
+            <>
+                <View style={styles.formCard}>
+                    <Text style={styles.sectionTitle}>👤 අලුත් කෙනෙක් (Save to Cloud)</Text>
+                    <TextInput style={styles.input} placeholder="නම (Name)" value={name} onChangeText={setName} />
+                    <TextInput style={styles.input} placeholder="දුරකථන අංකය (Mobile)" keyboardType="phone-pad" value={mobile} onChangeText={setMobile} />
+                    <TextInput style={styles.input} placeholder="ණය සීමාව (Default: 5000)" keyboardType="numeric" value={creditLimit} onChangeText={setCreditLimit} />
+                    <TouchableOpacity style={styles.addButton} onPress={addCustomer}>
+                        <Text style={styles.addButtonText}>☁️ Save Online</Text>
+                    </TouchableOpacity>
+                </View>
+                <View style={styles.searchContainer}>
+                    <Text style={{fontSize:20, marginRight:10}}>🔍</Text>
+                    <TextInput style={styles.searchInput} placeholder="Search..." value={searchQuery} onChangeText={setSearchQuery} />
+                </View>
+            </>
+            }
+            renderItem={({ item }) => (
+            <TouchableOpacity onPress={() => openTransactionModal(item)} onLongPress={() => deleteCustomer(item.id)} style={styles.customerCard}>
+                <View style={styles.avatarContainer}>
+                    <Text style={styles.avatarText}>{item.customerNo}</Text>
+                </View>
+                <View style={{flex:1, marginLeft: 15}}>
+                    <Text style={styles.customerName}>{item.name}</Text>
+                    {item.balance > (item.creditLimit || 5000) && <Text style={{color:'red', fontSize:10, fontWeight:'bold'}}>⚠️ LIMIT EXCEEDED</Text>}
+                    <Text style={styles.customerMobile}>{item.mobile || 'No Number'}</Text>
+                </View>
+                <View style={{alignItems:'flex-end'}}>
+                    <Text style={{fontSize:12, color:'#888'}}>Balance</Text>
+                    <Text style={[styles.balanceText, {color: item.balance > 0 ? '#D32F2F' : '#388E3C'}]}>
+                        {item.balance.toFixed(0)}
+                    </Text>
+                </View>
+            </TouchableOpacity>
+        )} />
+      </>
+      )}
 
       <Modal visible={modalVisible} animationType="slide" transparent={true} onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalOverlay}>
@@ -287,7 +316,7 @@ export default function NayaPotha() {
             <View style={styles.modalHeader}>
                 <View>
                     <Text style={styles.modalCustomerName}>{selectedCustomer?.name}</Text>
-                    <Text style={[styles.modalCustomerNo, {color: selectedCustomer?.balance > selectedCustomer?.creditLimit ? 'red' : '#888'}]}>
+                    <Text style={[styles.modalCustomerNo, {color: selectedCustomer && selectedCustomer.balance > (selectedCustomer.creditLimit || 5000) ? 'red' : '#888'}]}>
                         Limit: {selectedCustomer?.creditLimit}
                     </Text>
                 </View>
@@ -296,7 +325,7 @@ export default function NayaPotha() {
 
             <View style={styles.balanceDisplay}>
                 <Text style={{color:'#555'}}>Current Due:</Text>
-                <Text style={{fontSize:32, fontWeight:'bold', color: selectedCustomer?.balance > 0 ? '#D32F2F' : '#388E3C'}}>
+                <Text style={{fontSize:32, fontWeight:'bold', color: selectedCustomer && selectedCustomer.balance > 0 ? '#D32F2F' : '#388E3C'}}>
                     Rs. {selectedCustomer?.balance.toFixed(2)}
                 </Text>
             </View>
@@ -361,7 +390,7 @@ const styles = StyleSheet.create({
 
   formCard: { backgroundColor: 'white', marginHorizontal: 15, padding: 15, borderRadius: 15, elevation: 3, marginBottom: 10 },
   sectionTitle: { fontSize: 16, fontWeight: 'bold', color: '#444', marginBottom: 10 },
-  input: { backgroundColor: '#F0F2F5', borderRadius: 8, padding: 12, fontSize: 16, color: '#333', marginBottom: 10, width: '100%' }, // Changed styles here
+  input: { backgroundColor: '#F0F2F5', borderRadius: 8, padding: 12, fontSize: 16, color: '#333', marginBottom: 10, width: '100%' },
   addButton: { backgroundColor: '#0056D2', padding: 12, borderRadius: 8, alignItems: 'center', marginTop: 5 },
   addButtonText: { color: 'white', fontWeight: 'bold', fontSize: 16 },
 
